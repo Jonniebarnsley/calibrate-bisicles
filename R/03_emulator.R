@@ -1,113 +1,150 @@
-# 03 — obs-period emulator: train GP, build input vectors, predict (spec §5, §6).
-# Emulator inputs (11, fixed order): 6 params + 3 GCM dummies + thermal_forcing +
-# warming. Forcing covariates are included because they improve predictive skill
-# and are pure (gcm, scenario) lookups. Trained on the target-year cumulative
-# column (metres); the data is already cumulative-from-2007, so this directly
-# emulates the aggregate quantity — no summing of annual emulators (spec §6.2).
+# 03 — emulator trunk: shared infrastructure + mode dispatch.
 
-if (!exists("Y_mm")) source("R/02_aggregate_obs.R")
+if (!exists("Y_mm")) source("R/02_load_obs.R")
+if (!exists("ensemble")) source("R/01_load_ensemble.R")
 
-emu_cols <- c(param_cols, dummy_gcms, forcing_cols)
+emu_cols <- c(param_cols, gcm_input_cols, forcing_cols)
+message("03: input order -> ", paste(emu_cols, collapse = ", "))
 
-# Normalisation fit on training data (dummies are 0/1 and left untouched).
+# Save normalisation specs for inverting later
 norm_specs <- list()
-for (col in c(param_cols, forcing_cols)) {
+for (col in emu_cols) {
   norm_specs[[col]] <- norm_fit(ensemble[[col]], log = col %in% log_cols)
 }
 
-# Raw data.frame -> normalised emulator-input matrix (column order = emu_cols).
-design_df <- function(df) {
-  out <- matrix(0, nrow = nrow(df), ncol = length(emu_cols),
-                dimnames = list(NULL, emu_cols))
-  for (col in param_cols)   out[, col] <- norm_apply(df[[col]], norm_specs[[col]])
-  for (col in dummy_gcms)   out[, col] <- as.numeric(df[[col]])
-  for (col in forcing_cols) out[, col] <- norm_apply(df[[col]], norm_specs[[col]])
-  out
+# Raw data.frame -> normalised emulator-input matrix (using norm_specs)
+normalise_df <- function(df) {
+  sapply(emu_cols, function(col) norm_apply(df[[col]], norm_specs[[col]]))
 }
 
-X_train <- design_df(ensemble)             # input design — identical for every year
-trend   <- cbind(1, X_train)
-
-emu_cache_dir <- file.path(out_dir, "emulators")
-if (!dir.exists(emu_cache_dir)) dir.create(emu_cache_dir, recursive = TRUE)
-
-# Train (or load) the per-year GP for a year's cumulative SLC column. Disk cache
-# (clear the dir if the `emulator:` block changes) + in-memory memoisation so
-# repeated calls within a session are instant.
-.emu_mem <- new.env(parent = emptyenv())
-train_emulator <- function(year, cache = isTRUE(cfg$projection$cache_emulators)) {
-  key <- as.character(year)
-  if (!is.null(.emu_mem[[key]])) return(.emu_mem[[key]])
-  f <- file.path(emu_cache_dir, sprintf("emulator_%d.rds", year))
-  if (cache && file.exists(f)) { m <- readRDS(f); .emu_mem[[key]] <- m; return(m) }
-  resp <- ensemble[[ycol(year)]]
-  ok   <- is.finite(resp)
-  m <- NULL
-  invisible(utils::capture.output(            # silence the optimiser chatter
-    m <- rgasp(
-      design      = X_train[ok, , drop = FALSE],
-      response    = resp[ok],
-      trend       = trend[ok, , drop = FALSE],
-      kernel_type = cfg$emulator$kernel_type,
-      alpha       = cfg$emulator$alpha,
-      nugget.est  = cfg$emulator$nugget_est
-    )))
-  if (cache) saveRDS(m, f)
-  .emu_mem[[key]] <- m
-  m
-}
-
-# Emulator mode: per-year GPs (default) or the SVD basis-function emulator.
-if (isTRUE(cfg$svd$enabled)) {
-  source("R/svd_emulator.R")                  # builds basis + coefficient emulators (+ diagnostic)
-} else {
-  emulator <- train_emulator(cfg$obs$target_year)   # obs-period GP
-  # [CHECK §5] obs-period sensitivity to inputs (thermal_forcing/warming expected inert).
-  message("03: input order -> ", paste(emu_cols, collapse = ", "))
-  invisible(findInertInputs(emulator))
-}
-
-# Unified predictor: SLC mean & sd (mm) for a NORMALISED input matrix, at one year
-# (returns vectors) or several (returns K x length(year) matrices). Dispatches on the
-# emulator mode. In SVD mode a year vector reuses one coefficient prediction across
-# all years, which is the whole point of the basis emulator — so callers that span
-# many years should pass the full vector rather than looping year by year.
-predict_slc_mm <- function(Xnorm, year) {
-  if (isTRUE(cfg$svd$enabled)) return(svd_predict_mm(Xnorm, year))
-  if (length(year) == 1L) {
-    pr <- predict(train_emulator(year), Xnorm, testing_trend = cbind(1, Xnorm))
-    return(list(mean = pr$mean * 1000, sd = pr$sd * 1000))
-  }
-  M <- S <- matrix(0, nrow(Xnorm), length(year))
-  for (j in seq_along(year)) {
-    pr <- predict(train_emulator(year[j]), Xnorm, testing_trend = cbind(1, Xnorm))
-    M[, j] <- pr$mean * 1000; S[, j] <- pr$sd * 1000
-  }
-  list(mean = M, sd = S)
-}
-
-# Build a normalised input matrix from normalised parameter samples (K x 6, in
-# [0,1], columns named param_cols) for one GCM stratum + scenario: sets the GCM
-# dummies and the (gcm, scenario) forcing lookup, normalised consistently.
-build_norm_inputs <- function(params_norm, gcm, scenario) {
-  K <- nrow(params_norm)
-  X <- matrix(0, nrow = K, ncol = length(emu_cols),
-              dimnames = list(NULL, emu_cols))
-  X[, param_cols] <- as.matrix(params_norm)[, param_cols]
-  for (g in dummy_gcms) X[, g] <- as.numeric(g == gcm)
+# Helper function to build normalised emulator inputs for a given set of
+# parameter samples, gcm, and scenario. Useful later when predicting large
+# Monte Carlo sample.
+build_norm_inputs <- function(params_raw, gcm, scenario) {
   fl <- forcing_lookup[forcing_lookup[[gcm_col]] == gcm &
                          forcing_lookup[[scen_col]] == scenario, ]
   stopifnot(nrow(fl) == 1)
-  for (col in forcing_cols) X[, col] <- norm_apply(fl[[col]], norm_specs[[col]])
-  X
+  df <- params_raw
+  for (col in gcm_input_cols) df[[col]] <- as.integer(col == gcm)
+  for (col in forcing_cols)   df[[col]] <- fl[[col]]
+  normalise_df(df)
 }
 
-# Raw parameter data.frame -> normalised parameter data.frame (training space),
-# columns named param_cols. Used to push stored posterior samples back through the
-# emulator (projection §7, sensitivity §8).
-norm_params <- function(df) {
-  out <- as.data.frame(lapply(param_cols,
-                              function(c) norm_apply(df[[c]], norm_specs[[c]])))
-  names(out) <- param_cols
-  out
+# Emulator inputs and trend
+X_train <- normalise_df(ensemble)
+trend   <- cbind(1, X_train)
+
+# Functions to make diagnostic plots investigating emulator accuracy:
+#  - leave-one-out
+#  - main-effects
+# Outputs go to outputs/diagnostics/.
+diag_dir <- file.path(out_dir, "diagnostics")
+if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE)
+
+# LOO scatter PDF: actual vs predicted, with +/-2sd error bars and headline
+# metrics (RMSE, pass-rate, normalised error distance).
+write_loo_pdf <- function(df, year) {
+  df$UB <- df$mean + 2 * df$sd
+  df$LB <- df$mean - 2 * df$sd
+  df$ok <- df$actual > df$LB & df$actual < df$UB
+
+  # Subset df into pass and fail samples
+  good  <- df[df$ok, ]
+  bad <- df[!df$ok, ]
+
+  # Compute headline statistics
+  rmse  <- sqrt(mean((df$actual - df$mean)^2))
+  ned   <- sqrt(sum((df$actual - df$mean)^2 / df$sd^2))
+  pass  <- mean(df$ok) * 100
+  lim   <- range(df$LB, df$UB)
+
+  # Make and save plot
+  pdf(file.path(diag_dir, sprintf("loo_%d.pdf", year)),
+      width = 4.6, height = 4.6)
+  par(mar = c(4, 4, 2.5, 1))
+  plot(good$actual, good$mean,
+       xlim = lim, ylim = lim,
+       xlab = "Actual SLC (mm)", ylab = "Predicted SLC (mm)",
+       main = sprintf("LOO — %d", year),
+       col = "cornflowerblue", pch = 1, cex = 0.5)
+  points(bad$actual, bad$mean, col = "indianred", pch = 1, cex = 0.5)
+  segments(good$actual, good$UB, good$actual, good$LB,
+           col = rgb(0, 0, 1, alpha = 0.2), lwd = 2)
+  segments(bad$actual, bad$UB, bad$actual, bad$LB,
+           col = rgb(1, 0, 0, alpha = 0.2), lwd = 2)
+  abline(0, 1, lwd = 1)
+  legend("topleft", bty = "n", cex = 0.75, text.col = "grey25",
+         legend = c(sprintf("RMSE = %.3f mm", rmse),
+                    sprintf("pass = %.1f %%",  pass),
+                    sprintf("NED = %.1f",      ned)))
+  dev.off()
 }
+
+# Main-effects PDF: each non-dummy input is swept on [0,1] with all others
+# (including GCM dummies) fixed at 0.5. predict_slc_mm is referenced lazily —
+# it's resolved when the function is *called*, so this definition can come
+# before the mode dispatch that sets predict_slc_mm.
+diag_colors <- c("orangered", "seagreen3", "royalblue1", "plum2",
+                 "slateblue1", "sienna1", "goldenrod1", "darkseagreen")
+
+write_main_effects_pdf <- function(year) {
+  sweep_cols <- setdiff(emu_cols, gcm_input_cols)
+  ntest      <- 100
+  grid       <- seq(0, 1, length.out = ntest)
+
+  # Build a list of (x, mean, LB, UB) data frames, one per swept column.
+  me <- list()
+  for (col in sweep_cols) {
+    X <- matrix(0.5, nrow = ntest, ncol = length(emu_cols),
+                dimnames = list(NULL, emu_cols))
+    X[, col] <- grid
+    pr <- predict_slc_mm(X, year) # predict function depends on svd.enabled
+    me[[col]] <- data.frame(x = grid, mean = pr$mean,
+                            LB = pr$mean - 2 * pr$sd,
+                            UB = pr$mean + 2 * pr$sd)
+  }
+
+  # Panel grid + shared y-range across panels.
+  N    <- length(me)
+  a    <- floor(sqrt(N)); b <- ceiling(N / a)
+  ymax <- max(vapply(me, function(d) max(d$UB), numeric(1)))
+  ymin <- min(vapply(me, function(d) min(d$LB), numeric(1)))
+
+  # Make and save plot
+  pdf(file.path(diag_dir, sprintf("main_effects_%d.pdf", year)),
+      width = 3.2 * b, height = 2.8 * a)
+  par(mfrow = c(a, b), mar = c(4, 4, 2, 1), oma = c(0, 0, 2.5, 0))
+  for (i in seq_along(me)) {
+    d   <- me[[i]]
+    col <- diag_colors[((i - 1L) %% length(diag_colors)) + 1L]
+    plot(d$x, d$mean, type = "n",
+         xlim = c(0, 1), ylim = c(ymin, ymax),
+         xlab = names(me)[i], ylab = "SLC (mm)")
+    polygon(c(d$x, rev(d$x)), c(d$LB, rev(d$UB)),
+            col = adjustcolor(col, 0.3), border = NA)
+    lines(d$x, d$mean, col = col, lwd = 1.8)
+  }
+  mtext(sprintf("Main effects at %d (all other inputs fixed at 0.5)", year),
+        outer = TRUE, line = 0.7, cex = 1.0, font = 2)
+  dev.off()
+  message(sprintf("03: wrote main_effects_%d.pdf", year))
+}
+
+# Predict function depends on svd.enabled in config:
+#  - if false, emulate each year separately.
+#  - if true, emulate svd coeffs and predict slc through linear combination.
+# SVD approach is much faster when requesting many years, as can be done by
+# training only ~5 emulators. Both return slc mean & sd (mm) for a given input,
+# at one year (returns vectors) or several (returns K x length(year) matrices).
+# 03a/03b call write_loo_pdf at source time, so they're sourced after both
+# helpers above are defined.
+if (isFALSE(cfg$svd$enabled)) {
+  source("R/03a_emulate_by_year.R")
+  predict_slc_mm <- peryear_predict_mm
+} else {
+  source("R/03b_emulate_by_svd.R")
+  predict_slc_mm <- svd_predict_mm
+}
+
+if (isTRUE(cfg$emulator$main_effects))
+  for (year in cfg$emulator$diagnostic_years) write_main_effects_pdf(year)
