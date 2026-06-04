@@ -1,5 +1,5 @@
-# Calibration configuration — all [DECISION NEEDED] values live here.
-# Sensitivity runs (spec §8) should change ONLY this file, never code.
+# --- Calibration configuration ---
+# Runs should change ONLY this file, never code.
 
 paths:
   ensemble: "ANT_2007-2300_sle.csv"
@@ -8,22 +8,15 @@ paths:
 
 data:
   param_cols: ["aPhi", "n", "m", "uf", "gamma", "UMV"]  # the 6 free parameters
-  log_cols: ["aPhi", "gamma", "UMV"]                     # sampled/normalised on log10
-  forcing_cols: ["thermal_forcing"]           # pure functions of (gcm, scenario)
+  log_cols: ["aPhi", "gamma", "UMV"]                    # sampled/normalised on log10
+  gcm_input_cols: ["CESM2-WACCM", "MRI-ESM2-0", "MIROC-ES2L"] # EC-Earth3-Veg = (0, 0, 0)
+  forcing_cols: ["GMSTa"] # functions of (gcm, scenario)
   gcm_col: "model"
   scenario_col: "scenario"
-  gcm_reference: "EC-Earth3-Veg"        # baseline level dropped under dummy coding
-  gcms: ["CESM2-WACCM", "MRI-ESM2-0", "EC-Earth3-Veg", "MIROC-ES2L"]
-  scenarios: ["ssp126", "ssp534-over", "ssp585"]
 
-# Prior ranges [min, max] in raw units for the dense parameter sampling (§6).
-# log_cols (above) are drawn log-uniform; the rest uniform. These are the design
-# priors, independent of the ensemble's realised min/max. Samples are mapped into
-# the emulator's training-normalised space before prediction; ranges that exceed
-# the training box trigger an extrapolation warning in 04.
 priors:
   aPhi:  [1.0e+9, 1.0e+17]
-  "n":   [2, 4]              # quoted: bare n is YAML boolean false
+  "n":   [2, 4]              # n in quotes because bare n is YAML boolean false
   m:     [1, 5]
   uf:    [50, 300]
   gamma: [9619, 159189]
@@ -32,53 +25,41 @@ priors:
 obs:
   baseline_year: 2007        # ensemble slc baseline (slc == 0 here)
   target_year: 2021          # cumulative-window end; IMBIE record actually ends 2020.92
-  sigma_obs_cum_mm: 1.11     # uncertainty on the 2007->2021 cumulative DIFFERENCE
-  # = sqrt(sigma_2021^2 - sigma_2007^2) = sqrt(1.47^2 - 0.96^2). IMBIE builds the
-  # cumulative error as a root-sum-square of (independent) monthly errors, so the
-  # cumulative variance is additive and the difference variance is sigma_2021^2 -
-  # sigma_2007^2. Using sigma_2021 = 1.47 alone would assume the 2007 baseline is
-  # exact; the arithmetic difference 1.47-0.96 would assume perfectly correlated
-  # errors (contradicts the RSS construction).
+  # sigma_obs_cum_mm is derived in 02 as sqrt(sigma_t1^2 - sigma_t0^2) from IMBIE.
 
 emulator:
   kernel_type: "matern_5_2"
   alpha: 1.9
   nugget_est: true
+  leave_one_out: true                # write LOO scatter PDFs to outputs/diagnostics/
+  main_effects: true                 # write main-effects sweep PDFs to outputs/diagnostics/
+  diagnostic_years: [2021, 2300]
 
 # Emulator mode: per-year GPs (default) vs SVD basis-function emulator (Higdon 2008).
 svd:
   enabled: false            # false = one GP per year; true = SVD coefficient emulators
   n_components: 5           # number of SVD components to emulate when enabled
-  run_diagnostic: false      # write outputs/svd_diagnostic.csv (r=1..9 reconstruction metrics)
-
-# Emulator diagnostics (R/03c_emulator_diagnostics.R): LOO scatter + main-effects
-# panels at the listed years. Mode-agnostic (per-year GP or SVD reconstruction).
-# Regenerated only when the emulator setup changes.
-diagnostics:
-  years: [2021, 2300]
+  run_diagnostic: false     # write outputs/svd_diagnostic.csv (r=1..9 reconstruction metrics)
 
 weighting:
   obs_ref_scenario: "ssp126"   # forcing lookup for obs period (period is forcing-inert)
   n_samples: 10000             # K dense prior draws per GCM stratum
   sigma_mod_mult: 2            # model discrepancy sigma_mod = sigma_mod_mult * sigma_obs
-                               #   (PRIMARY lever; lower it to sharpen the calibration)
   likelihood: "gaussian"       # gaussian | student_t
   student_t_df: 4              # degrees of freedom if likelihood == student_t
   seed: 1
 
 projection:
-  year_from: 2020              # timeseries grid for the calibrated bands
+  year_from: 2010
   year_to: 2300
-  year_by: 5                   # one emulator trained per grid year (cached)
-  gcm_marginal: true           # also report a uniform-GCM-prior marginal (labelled)
+  year_by: 10
+  gcm_marginal: true           # also report a uniform-GCM-prior marginal
   cache_emulators: true        # cache per-year GPs in outputs/emulators/
 
-# §8 sensitivity: one-at-a-time sweeps around the baseline weighting config.
-# (Axis 4, leave-one-year-out, is N/A — the target is a single aggregated scalar.)
+# sensitivity to choice of model discrepancy
 sensitivity:
   report_years: [2100, 2300]
-  sigma_mod_mult: [1, 1.5, 2, 4, 10]      # dominant discrepancy lever
-  sigma_obs_cum_mm: [1.11, 1.47]           # indep-increment vs endpoint obs error
+  sigma_mod_mult: [1, 2, 4, 10]            # model discrepancy
   likelihood: ["gaussian", "student_t"]    # robustness to outlying runs
 
 # Variance decomposition (run_variance.R) — prior-ensemble uncertainty attribution.
@@ -92,5 +73,5 @@ variance:
   sobol_n: 4000              # Saltelli base sample N; total emulator evals = N*(k+2)
   sobol_convergence: [1000, 2000, 4000, 8000]  # N values for a one-off convergence check
   forcing_severity: "warming"  # severity coordinate; thermal_forcing mapped from it per GCM
-  sobol_smooth_window: 5       # moving-average window (timesteps) for the Sobol' plots
-                               #   only; set to 1 to disable smoothing
+  sobol_smooth_window: 5       # smoothing window for the Sobol' plots; set to 1 to disable
+  
