@@ -6,13 +6,12 @@
 #       spans the GCMs' forcing values; the GCM dummy tracks the nearest GCM).
 # Run via run_variance.R. Follows Seroussi et al. (2023) / Coulon et al. (2025).
 
-if (!exists("train_emulator")) source("R/03_emulator_io.R")
+if (!exists("predict_slc_mm")) source("R/03_emulator.R")
 
 suppressPackageStartupMessages({ library(car); library(sensitivity); library(randtoolbox) })
 
-vcfg      <- cfg$variance
-vyears    <- seq(vcfg$year_from, vcfg$year_to, by = vcfg$year_by)
-scenarios <- cfg$data$scenarios
+vcfg   <- cfg$variance
+vyears <- seq(vcfg$year_from, vcfg$year_to, by = vcfg$year_by)
 
 # ---------------------------------------------------------------------------
 # (A) ANOVA — Type III SS fractions on the raw ensemble, per year.
@@ -90,7 +89,8 @@ design_to_inputs <- function(D, s) {
   X[, sev_col]   <- norm_apply(sev, norm_specs[[sev_col]])
   X[, other_col] <- norm_apply(fm$a + fm$b * sev, norm_specs[[other_col]])
   nearest <- fm$gcm_sorted[findInterval(sev, fm$mids) + 1L]   # GCM dummy tracks forcing
-  for (gg in dummy_gcms) X[, gg] <- as.numeric(nearest == gg)
+  if (length(gcm_input_cols))
+    X[, gcm_input_cols] <- outer(nearest, gcm_input_cols, `==`) * 1
   X
 }
 

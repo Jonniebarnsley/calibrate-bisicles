@@ -6,17 +6,15 @@
 
 if (!exists("weights", inherits = FALSE)) source("R/05_diagnostics.R")
 
-proj      <- cfg$projection
-years     <- seq(proj$year_from, proj$year_to, by = proj$year_by)
-probs     <- c(0.05, 0.17, 0.50, 0.83, 0.95)
-scenarios <- cfg$data$scenarios
+proj  <- cfg$projection
+years <- seq(proj$year_from, proj$year_to, by = proj$year_by)
+probs <- c(0.05, 0.17, 0.50, 0.83, 0.95)
 
-# Normalise the saved posterior parameters once per GCM (reused across years).
-# norm_params() is defined in 03_emulator_io.R.
-post_by_gcm <- setNames(lapply(gcms, function(g) {
-  wg <- weights[weights$gcm == g, ]
-  list(wg = wg, pn = norm_params(wg))
-}), gcms)
+# Per-GCM posterior subset (raw param values + their weights). build_norm_inputs
+# accepts raw params directly, so no preprocessing needed.
+post_by_gcm <- setNames(lapply(gcms,
+                               function(g) weights[weights$gcm == g, ]),
+                        gcms)
 
 row_qs <- function(gcm, scenario, year, dist, M, w) {
   q <- weighted_quantile(M, w, probs)
@@ -30,7 +28,7 @@ row_qs <- function(gcm, scenario, year, dist, M, w) {
 # cached annual GPs). Summaries then index the right column per year.
 Mgs <- list()
 for (g in gcms) for (s in scenarios) {
-  X <- build_norm_inputs(post_by_gcm[[g]]$pn, g, s)
+  X <- build_norm_inputs(post_by_gcm[[g]][, param_cols], g, s)
   Mgs[[paste(g, s)]] <- predict_slc_mm(X, years)$mean
 }
 
@@ -44,9 +42,9 @@ for (yi in seq_along(years)) {
       M  <- Mgs[[paste(g, s)]][, yi]                                     # mm
       records[[length(records) + 1L]] <- rbind(
         row_qs(g, s, yr, "prior",     M, rep(1, length(M))),
-        row_qs(g, s, yr, "posterior", M, pg$wg$weight))
+        row_qs(g, s, yr, "posterior", M, pg$weight))
       M_pool <- c(M_pool, M)
-      w_pool <- c(w_pool, pg$wg$weight / length(gcms))   # uniform prior over GCMs
+      w_pool <- c(w_pool, pg$weight / length(gcms))   # uniform prior over GCMs
     }
     if (isTRUE(proj$gcm_marginal)) {
       gm <- "ALL (uniform GCM prior)"
@@ -58,6 +56,64 @@ for (yi in seq_along(years)) {
 }
 projection <- do.call(rbind, records)
 write.csv(projection, file.path(out_dir, "projection.csv"), row.names = FALSE)
+
+# ---------------------------------------------------------------------------
+# Per-sample 2300 SLC for every (GCM, scenario) cell with its posterior weight
+# (long format: model, scenario, weight, slc_mm). Weights are per-GCM, repeated
+# unchanged across scenarios. Also a 5-panel weighted-KDE plot of (ssp126,
+# ssp534-over) at 2300 — per-GCM + uniform-GCM marginal — using SIR resampling
+# so MASS::kde2d (no native weight support) produces a weighted density.
+# ---------------------------------------------------------------------------
+i2300 <- match(2300L, years)
+if (!is.na(i2300)) {
+  sle_2300 <- do.call(rbind, lapply(gcms, function(g) {
+    pg <- post_by_gcm[[g]]
+    do.call(rbind, lapply(scenarios, function(s) {
+      data.frame(model    = g,
+                 scenario = s,
+                 weight   = pg$weight,
+                 slc_mm   = Mgs[[paste(g, s)]][, i2300])
+    }))
+  }))
+  write.csv(sle_2300, file.path(out_dir, "sle_2300.csv"), row.names = FALSE)
+
+  if (all(c("ssp126", "ssp534-over") %in% scenarios)) {
+    suppressPackageStartupMessages(library(MASS))
+    panels <- list()
+    for (g in gcms) panels[[g]] <- list(
+      x = Mgs[[paste(g, "ssp126")]][, i2300],
+      y = Mgs[[paste(g, "ssp534-over")]][, i2300],
+      w = post_by_gcm[[g]]$weight)
+    panels[["ALL (uniform GCM prior)"]] <- list(
+      x = unlist(lapply(panels[gcms], `[[`, "x"), use.names = FALSE),
+      y = unlist(lapply(panels[gcms], `[[`, "y"), use.names = FALSE),
+      w = unlist(lapply(panels[gcms],
+                        function(p) p$w / length(gcms)), use.names = FALSE))
+
+    lim <- range(unlist(lapply(panels, function(p) c(p$x, p$y))))
+    set.seed(cfg$weighting$seed)
+    K_res <- 10000L                                 # resample count per panel
+
+    pdf(file.path(out_dir, "sle_2300_ssp126_vs_ssp534over.pdf"),
+        width = 11, height = 7.5)
+    par(mfrow = c(2, 3), mar = c(4, 4, 2.5, 1), mgp = c(2.2, 0.7, 0))
+    for (nm in names(panels)) {
+      p   <- panels[[nm]]
+      idx <- sample.int(length(p$w), K_res, replace = TRUE, prob = p$w)
+      k   <- MASS::kde2d(p$x[idx], p$y[idx], n = 150, lims = c(lim, lim))
+      image(k, col = hcl.colors(64, "viridis"), xlim = lim, ylim = lim,
+            xlab = "SLC@2300 (mm), ssp126",
+            ylab = "SLC@2300 (mm), ssp534-over",
+            main = nm, cex.main = 0.95)
+      contour(k, add = TRUE, drawlabels = FALSE,
+              col = adjustcolor("white", 0.6), lwd = 0.5, nlevels = 6)
+      abline(0, 1, lty = 2, col = "grey85")        # line of equality
+    }
+    dev.off()
+    message(sprintf("06: wrote sle_2300.csv (%d rows) + sle_2300_ssp126_vs_ssp534over.pdf",
+                    nrow(sle_2300)))
+  }
+}
 
 # Prior-vs-posterior band plots: rows = GCM (+ marginal), cols = scenario.
 plot_gcms <- c(gcms, if (isTRUE(proj$gcm_marginal)) "ALL (uniform GCM prior)")

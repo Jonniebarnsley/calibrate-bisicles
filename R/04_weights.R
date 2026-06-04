@@ -4,7 +4,7 @@
 # which by construction equals the ensemble's LHS prior (log-uniform for log_cols,
 # uniform otherwise).
 
-if (!exists("emulator")) source("R/03_emulator_io.R")
+if (!exists("predict_slc_mm")) source("R/03_emulator.R")
 
 set.seed(cfg$weighting$seed)
 K            <- cfg$weighting$n_samples
@@ -22,25 +22,23 @@ for (p in param_cols) {
                     p, min(z), max(z)))
 }
 
-# Draw K samples per parameter from its configured prior in RAW units (log-uniform
-# for log_cols, uniform otherwise), then map into the emulator's training-normalised
-# space via norm_specs.
-sample_prior_norm <- function(K) {
-  out <- matrix(0, nrow = K, ncol = length(param_cols),
-                dimnames = list(NULL, param_cols))
-  for (p in param_cols) {
+# Draw K samples per parameter from its configured prior in raw units
+# (log-uniform for log_cols, uniform otherwise). build_norm_inputs handles the
+# normalisation into the emulator's training space.
+sample_prior <- function(K) {
+  out <- as.data.frame(lapply(param_cols, function(p) {
     rng <- as.numeric(priors[[p]])
-    raw <- if (p %in% log_cols) 10^runif(K, log10(rng[1]), log10(rng[2]))
-           else                 runif(K, rng[1], rng[2])
-    out[, p] <- norm_apply(raw, norm_specs[[p]])
-  }
-  as.data.frame(out)
+    if (p %in% log_cols) 10^runif(K, log10(rng[1]), log10(rng[2]))
+    else                 runif(K, rng[1], rng[2])
+  }))
+  names(out) <- param_cols
+  out
 }
 
 weight_stratum <- function(gcm) {
-  pn <- sample_prior_norm(K)
-  X  <- build_norm_inputs(pn, gcm, ref_scen)
-  pr <- predict_slc_mm(X, cfg$obs$target_year)
+  params <- sample_prior(K)
+  X      <- build_norm_inputs(params, gcm, ref_scen)
+  pr     <- predict_slc_mm(X, cfg$obs$target_year)
 
   # Per-sample total sigma: obs + model discrepancy + emulator predictive variance.
   # Heteroscedastic, so loglik_resid keeps the sigma-dependent normalisation term
@@ -52,12 +50,7 @@ weight_stratum <- function(gcm) {
   w <- exp(logL - max(logL))
   w <- w / sum(w)
 
-  # Back-transform parameters to raw units for downstream use.
-  raw <- as.data.frame(
-    lapply(param_cols, function(c) norm_invert(pn[[c]], norm_specs[[c]])))
-  names(raw) <- param_cols
-
-  cbind(data.frame(gcm = gcm), raw,
+  cbind(data.frame(gcm = gcm), params,
         data.frame(M_mm = pr$mean, emu_sd_mm = pr$sd, logL = logL, weight = w))
 }
 

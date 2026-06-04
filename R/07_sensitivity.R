@@ -1,48 +1,45 @@
 # 07 — sensitivity of the calibrated projections to the weighting assumptions (§8).
-# One-at-a-time sweeps around the baseline along three axes: the discrepancy
-# multiplier (dominant), the observation uncertainty, and the likelihood form.
-# The obs-period predictions (M, sd) and the future per-sample predictions are
-# FIXED across these settings — only the weights change — so they are computed once
-# and re-weighted, making the sweep cheap. Leave-one-year-out (spec axis 4) is N/A:
-# the target is a single aggregated 2021 scalar.
-#
-# Note the parameterisation couples the obs axis to the discrepancy: since
-# sigma_mod = mult * sigma_obs, varying sigma_obs rescales sigma_total as a whole.
+# One-at-a-time sweeps around the baseline along two axes: the discrepancy
+# multiplier (dominant) and the likelihood form. The obs-period predictions
+# (M, sd) and the future per-sample predictions are FIXED across these settings
+# — only the weights change — so they are computed once and re-weighted, making
+# the sweep cheap. Leave-one-year-out (spec axis 4) is N/A: the target is a
+# single aggregated 2021 scalar. sigma_obs is fixed at the derived value from
+# IMBIE (02), no longer a sweep axis now that the difference-of-squares formula
+# is settled.
 
 if (!exists("weights", inherits = FALSE)) source("R/04_weights.R")
 
-sens      <- cfg$sensitivity
-ryears    <- sens$report_years
-probs     <- c(0.05, 0.17, 0.50, 0.83, 0.95)
-scenarios <- cfg$data$scenarios
-df_t      <- if (is.null(cfg$weighting$student_t_df)) 4 else cfg$weighting$student_t_df
+sens   <- cfg$sensitivity
+ryears <- sens$report_years
+probs  <- c(0.05, 0.17, 0.50, 0.83, 0.95)
+df_t   <- if (is.null(cfg$weighting$student_t_df)) 4 else cfg$weighting$student_t_df
 
 # --- Fixed per-GCM quantities (independent of the weighting setting) ---
 # obs-period M & sd per sample (from 04) + future M per (report-year, scenario).
 fixed <- setNames(lapply(gcms, function(g) {
   wg  <- weights[weights$gcm == g, ]
-  pn  <- norm_params(wg)
   fut <- list()
   for (s in scenarios) {
-    X   <- build_norm_inputs(pn, g, s)
+    X   <- build_norm_inputs(wg[, param_cols], g, s)
     Msy <- predict_slc_mm(X, ryears)$mean              # K x length(ryears)
     for (j in seq_along(ryears)) fut[[paste(ryears[j], s)]] <- Msy[, j]
   }
   list(M = wg$M_mm, sd = wg$emu_sd_mm, fut = fut)
 }), gcms)
 
-# Recompute per-GCM weights for one (sigma_obs, mult, likelihood) setting.
-setting_weights <- function(g, sigma_obs, mult, likelihood) {
+# Recompute per-GCM weights for one (mult, likelihood) setting; sigma_obs is fixed.
+setting_weights <- function(g, mult, likelihood) {
   f     <- fixed[[g]]
-  sigma <- sqrt(sigma_obs^2 + (mult * sigma_obs)^2 + f$sd^2)
+  sigma <- sqrt(sigma_obs_mm^2 + (mult * sigma_obs_mm)^2 + f$sd^2)
   logL  <- loglik_resid(Y_mm - f$M, sigma, likelihood, df_t)
   w <- exp(logL - max(logL)); w / sum(w)
 }
 
 # Weighted bands at each (report-year, scenario) per GCM + uniform-GCM marginal.
-summarise_setting <- function(axis, value, sigma_obs, mult, likelihood) {
-  W    <- setNames(lapply(gcms, setting_weights, sigma_obs = sigma_obs,
-                          mult = mult, likelihood = likelihood), gcms)
+summarise_setting <- function(axis, value, mult, likelihood) {
+  W    <- setNames(lapply(gcms, setting_weights, mult = mult,
+                          likelihood = likelihood), gcms)
   rows <- list()
   add  <- function(gcm, s, yr, ess, M, w) {
     q <- weighted_quantile(M, w, probs)
@@ -64,17 +61,14 @@ summarise_setting <- function(axis, value, sigma_obs, mult, likelihood) {
 }
 
 # --- One-at-a-time sweep (baseline values appear within each axis list) ---
-base_obs  <- sigma_obs_mm
 base_mult <- cfg$weighting$sigma_mod_mult
 base_lik  <- cfg$weighting$likelihood
 
 res <- list()
 for (v in sens$sigma_mod_mult)
-  res[[length(res) + 1L]] <- summarise_setting("sigma_mod_mult", v, base_obs, v, base_lik)
-for (v in sens$sigma_obs_cum_mm)
-  res[[length(res) + 1L]] <- summarise_setting("sigma_obs_cum_mm", v, v, base_mult, base_lik)
+  res[[length(res) + 1L]] <- summarise_setting("sigma_mod_mult", v, v, base_lik)
 for (v in sens$likelihood)
-  res[[length(res) + 1L]] <- summarise_setting("likelihood", v, base_obs, base_mult, v)
+  res[[length(res) + 1L]] <- summarise_setting("likelihood", v, base_mult, v)
 
 sensitivity <- do.call(rbind, res)
 write.csv(sensitivity, file.path(out_dir, "sensitivity.csv"), row.names = FALSE)
