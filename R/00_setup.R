@@ -15,6 +15,8 @@ cfg <- yaml::read_yaml(config_path)
 out_dir <- cfg$paths$outputs
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
+# --- Helper functions ---
+
 # Min-max normalisation to [0,1], optionally on a log10 scale. norm_fit()
 # records the transform from the training data so norm_apply() can reapply it
 # to fresh samples or to (gcm, scenario) forcing lookups.

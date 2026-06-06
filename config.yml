@@ -38,6 +38,8 @@ emulator:
   nugget_est: true
   leave_one_out: true                # write LOO scatter PDFs to outputs/diagnostics/
   main_effects: true                 # write main-effects sweep PDFs to outputs/diagnostics/
+  main_effects_gcm: "CESM2-WACCM"    # anchor GCM for the main-effects sweep (dummies one-hot)
+  main_effects_scenario: "ssp585"    # anchor scenario for the main-effects sweep (forcing fixed)
   diagnostic_years: [2021, 2300]     # years at which to produce LOO or main-effects plots
 
 # Emulator mode: per-year GPs (default) vs SVD basis-function emulator (Higdon 2008).

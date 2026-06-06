@@ -10,7 +10,7 @@ unc_col <- "Cumulative mass balance uncertainty (mm)"
 # returns the 2020.92 row since the record ends there.
 nearest_row <- function(df, yr) df[which.min(abs(df$Year - yr)), ]
 
-load_one_obs <- function(path, label = "") {
+load_one_obs <- function(path, label) {
   imbie <- read.csv(path, check.names = FALSE)
   r0    <- nearest_row(imbie, cfg$obs$baseline_year)
   r1    <- nearest_row(imbie, cfg$obs$target_year)
@@ -23,9 +23,8 @@ load_one_obs <- function(path, label = "") {
   sigma_obs_mm <- sqrt(r1[[unc_col]]^2 - r0[[unc_col]]^2)
 
   message(sprintf(
-    "02%s: Y = %.3f mm  (IMBIE %.2f -> %.2f over %.2f-%.2f);  sigma_obs = %.3f mm",
-    if (nchar(label) > 0) paste0(" [", label, "]") else "",
-    Y_mm, r0[[cum_col]], r1[[cum_col]], r0$Year, r1$Year, sigma_obs_mm
+    "02 [%s]: Y = %.3f mm;  sigma_obs = %.3f mm",
+    label, Y_mm, sigma_obs_mm
   ))
 
   list(Y_mm = Y_mm, sigma_obs_mm = sigma_obs_mm)

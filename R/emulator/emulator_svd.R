@@ -1,13 +1,17 @@
 # SVD basis-function emulator (Higdon et al. 2008). Standardises each year,
 # takes the SVD basis, emulates the leading n_components coefficients as GPs,
 # and reconstructs SLC(year) with a truncation-variance term (the discarded
-# components enter as a per-year residual variance). Sourced from
-# emulate_basin.R; exposes build_svd_state(), svd_predict_mm(),
-# reconstruct_slc_mm(), and run_svd_diagnostic().
+# components enter as a per-year residual variance).
+#
+# Provides:
+#   build_emulator_svd(ens, label)  - constructor; returns an emulator_svd
+#   predict.emulator_svd(...)        - S3 method
+#   reconstruct_slc_mm(...)          - shared helper (also used by LOO)
+#   run_svd_diagnostic(emu)          - optional rank-selection CSV
 
 stopifnot(exists("X_train"))
 
-build_svd_state <- function(ens) {
+build_emulator_svd <- function(ens, label) {
   ycols   <- grep("^[0-9]{4}$", names(ens), value = TRUE)
   Y       <- as.matrix(ens[, ycols]) * 1000   # mm
 
@@ -47,11 +51,12 @@ build_svd_state <- function(ens) {
   }
 
   message(sprintf(
-    "SVD: %d components (%.2f%% var).",
-    ncomp, 100 * sum(varfrac[1:ncomp])
+    "SVD [%s]: %d components (%.2f%% var).",
+    label, ncomp, 100 * sum(varfrac[1:ncomp])
   ))
 
-  list(
+  emu <- list(
+    label     = label,
     years     = as.integer(ycols),
     Y         = Y,           # Raw output matrix in mm
     mu        = mu,          # Per-column means of Y
@@ -65,17 +70,19 @@ build_svd_state <- function(ens) {
     coef_loo  = coef_loo,    # LOO results for each emulator
     trunc_var = trunc_var    # Per-year truncation uncertainty
   )
+  class(emu) <- c("emulator_svd", "emulator")
+  emu
 }
 
 # Reconstruct slc mean & sd (mm) at requested year(s) from per-sample
 # coefficient mean/sd matrices (K x r) using the SVD basis, including the
-# truncation variance.
-reconstruct_slc_mm <- function(coef_mean, coef_sd, year, state,
-                               trunc_var = state$trunc_var) {
-  year_i <- match(year, state$years)
+# truncation variance. Shared by predict.emulator_svd and the SVD LOO method.
+reconstruct_slc_mm <- function(coef_mean, coef_sd, year, emu,
+                               trunc_var = emu$trunc_var) {
+  year_i <- match(year, emu$years)
   stopifnot(!any(is.na(year_i)))                # Years must be in training data
   r      <- ncol(coef_mean)
-  V_ir   <- state$V[year_i, 1:r, drop = FALSE]
+  V_ir   <- emu$V[year_i, 1:r, drop = FALSE]
 
   # Reconstruct mean and total variance in standardised (z) space
   mean_z    <- coef_mean %*% t(V_ir)
@@ -83,52 +90,51 @@ reconstruct_slc_mm <- function(coef_mean, coef_sd, year, state,
   tot_var_z <- sweep(emu_var_z, 2, trunc_var[year_i], "+")
 
   # Un-standardise to slc mean and sd in mm
-  sds <- state$sds[year_i]
-  mu  <- state$mu[year_i]
+  sds <- emu$sds[year_i]
+  mu  <- emu$mu[year_i]
   mean_mm <- sweep(sweep(mean_z, 2, sds, "*"), 2, mu, "+")
   sd_mm   <- sweep(sqrt(tot_var_z), 2, sds, "*")
   list(mean = mean_mm, sd = sd_mm)
 }
 
 # Predict SLC mean & sd (mm) at year(s) for a normalised input matrix X.
-svd_predict_mm <- function(X, year, state) {
-  K         <- nrow(X)
-  r         <- state$ncomp
+predict.emulator_svd <- function(object, X, year, ...) {
+  K <- nrow(X); r <- object$ncomp
   coef_mean <- matrix(0, K, r)   # dim = (nsamples, ncomp)
   coef_sd   <- matrix(0, K, r)
 
   # For each component, predict its coefficient and store its mean and sd.
   for (i in seq_len(r)) {
-    pr <- predict(state$coef_emu[[i]], X, testing_trend = cbind(1, X))
+    pr <- predict(object$coef_emu[[i]], X, testing_trend = cbind(1, X))
     coef_mean[, i] <- pr$mean
     coef_sd[, i]   <- pr$sd
   }
 
-  out <- reconstruct_slc_mm(coef_mean, coef_sd, year, state)
+  out <- reconstruct_slc_mm(coef_mean, coef_sd, year, object)
   if (length(year) == 1L)
     list(mean = as.numeric(out$mean), sd = as.numeric(out$sd))
   else
     out
 }
 
-# Diagnostics: for r = 1..9,  compute variance explained, coefficient LOO R2,
+# Diagnostics: for r = 1..9, compute variance explained, coefficient LOO R2,
 # and the end-to-end LOO reconstruction metrics (RMSE in mm, nRMSE, NED,
 # pass_rate) at 2021 and 2300.
-run_svd_diagnostic <- function(state) {
+run_svd_diagnostic <- function(emu) {
 
   N_DIAG <- 9     # rank-selection table covers r = 1..N_DIAG
 
   # Local aliases for readability of the matrix algebra below.
-  Y       <- state$Y
-  Ys      <- state$Ys
-  V       <- state$V
-  scores  <- state$scores
-  varfrac <- state$varfrac
-  ncomp   <- state$ncomp
+  Y       <- emu$Y
+  Ys      <- emu$Ys
+  V       <- emu$V
+  scores  <- emu$scores
+  varfrac <- emu$varfrac
+  ncomp   <- emu$ncomp
 
   # Reuse the production coef_loo for the first ncomp components; fit any
   # additional components (ncomp+1..N_DIAG) locally on the fly.
-  coef_loo <- state$coef_loo
+  coef_loo <- emu$coef_loo
   if (ncomp < N_DIAG) for (i in (ncomp + 1L):N_DIAG) {
     invisible(utils::capture.output(
       m <- rgasp(
@@ -147,7 +153,7 @@ run_svd_diagnostic <- function(state) {
 
   # Years at which to report end-to-end LOO metrics, and their column indices.
   diagnostic_years    <- c(2021, 2300)
-  diagnostic_year_i <- match(diagnostic_years, state$years)
+  diagnostic_year_i   <- match(diagnostic_years, emu$years)
   slc_year_sd         <- apply(Y, 2, sd)
 
   rows <- lapply(seq_len(N_DIAG), function(r) {
@@ -162,29 +168,28 @@ run_svd_diagnostic <- function(state) {
     trunc_var_r <- colMeans((Ys - scores_r %*% t(V_r))^2)
 
     # Reconstruct slc mean and sd (mm) at the diagnostic years only, using the
-    # r-specific truncation. reconstruct_slc_mm is defined above.
+    # r-specific truncation.
     recon <- reconstruct_slc_mm(coef_mean_loo_r, coef_sd_loo_r,
-                                diagnostic_years, state, trunc_var = trunc_var_r)
+                                diagnostic_years, emu, trunc_var = trunc_var_r)
 
     # R-squared for the r'th SVD component's LOO test.
     loo_r2 <- 1 - mean((coef_loo[[r]]$mean - scores[, r])^2) / var(scores[, r])
 
-    # Output dataframe with metrics
     out <- data.frame(
       r       = r,
-      var_pc  = 100 * varfrac[r], # variance explained by the r'th component
+      var_pc  = 100 * varfrac[r],         # variance explained by r'th component
       var_cum = 100 * sum(varfrac[1:r]),  # cumulative variance explained
-      loo_r2  = loo_r2  # R-squared for the r'th SVD component's LOO test.
+      loo_r2  = loo_r2
     )
 
-    for (k in seq_along(diagnostic_years)) {     # 2021 and 2300
+    for (k in seq_along(diagnostic_years)) {    # 2021 and 2300
       yi      <- diagnostic_year_i[k]
       err     <- Y[, yi] - recon$mean[, k]      # emulator-BISICLES misfit
       pred_sd <- recon$sd[, k]                  # emulator uncertainty
-      rmse    <- sqrt(mean(err^2))              # RMSE
-      nrmse   <- rmse / slc_year_sd[yi]         # Normalised RMSE
-      ned     <- sqrt(sum((err / pred_sd)^2))   # Normalised Euclidean Distance
-      pass    <- mean(abs(err) <= 2 * pred_sd)  # Pass rate
+      rmse    <- sqrt(mean(err^2))
+      nrmse   <- rmse / slc_year_sd[yi]
+      ned     <- sqrt(sum((err / pred_sd)^2))
+      pass    <- mean(abs(err) <= 2 * pred_sd)
       out[[paste0("rmse_mm_", diagnostic_years[k])]] <- rmse
       out[[paste0("nRMSE_",   diagnostic_years[k])]] <- nrmse
       out[[paste0("NED_",     diagnostic_years[k])]] <- ned
@@ -193,12 +198,8 @@ run_svd_diagnostic <- function(state) {
     out
   })
 
-  # Write to file
-  diagnostic_csv_path <- file.path(out_dir, "svd_diagnostic.csv")
-  write.csv(
-    do.call(rbind, rows),
-    diagnostic_csv_path,
-    row.names = FALSE
-  )
+  diagnostic_csv_path <- file.path(out_dir,
+                                   sprintf("svd_diagnostic_%s.csv", emu$label))
+  write.csv(do.call(rbind, rows), diagnostic_csv_path, row.names = FALSE)
   message("SVD: diagnostic written to ", diagnostic_csv_path)
 }

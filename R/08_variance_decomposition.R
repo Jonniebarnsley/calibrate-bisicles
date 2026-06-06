@@ -6,7 +6,7 @@
 #       spans the GCMs' forcing values; the GCM dummy tracks the nearest GCM).
 # Run via run_variance.R. Follows Seroussi et al. (2023) / Coulon et al. (2025).
 
-if (!exists("predict_slc_mm")) source("R/03_emulate.R")
+if (!exists("emulators")) source("R/03_emulate.R")
 
 suppressPackageStartupMessages({ library(car); library(sensitivity); library(randtoolbox) })
 
@@ -20,7 +20,7 @@ total_slr_year <- function(yr)
 
 # Emulated TOTAL SLC mean = sum of per-basin emulator means.
 predict_total_mm <- function(X, year)
-  Reduce("+", lapply(predict_slc_mm_list, function(pred) pred(X, year)$mean))
+  Reduce("+", lapply(emulators, function(emu) predict(emu, X, year)$mean))
 
 # ---------------------------------------------------------------------------
 # (A) ANOVA — Type III SS fractions on the raw ensemble, per year.

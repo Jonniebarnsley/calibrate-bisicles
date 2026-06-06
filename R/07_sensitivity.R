@@ -23,8 +23,8 @@ fixed <- setNames(lapply(gcms, function(g) {
   fut <- list()
   for (s in scenarios) {
     X   <- build_norm_inputs(wg[, param_cols], g, s)
-    Msy <- Reduce("+", lapply(predict_slc_mm_list,
-                              function(pred) pred(X, ryears)$mean))   # K x length(ryears)
+    Msy <- Reduce("+", lapply(emulators,
+                              function(emu) predict(emu, X, ryears)$mean))   # K x length(ryears)
     for (j in seq_along(ryears)) fut[[paste(ryears[j], s)]] <- Msy[, j]
   }
   per_basin <- lapply(basin_labels, function(bl) list(

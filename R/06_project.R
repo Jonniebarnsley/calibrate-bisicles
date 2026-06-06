@@ -29,8 +29,8 @@ row_qs <- function(gcm, scenario, year, dist, M, w) {
 Mgs <- list()
 for (g in gcms) for (s in scenarios) {
   X <- build_norm_inputs(post_by_gcm[[g]][, param_cols], g, s)
-  Mgs[[paste(g, s)]] <- Reduce("+", lapply(predict_slc_mm_list,
-                                           function(pred) pred(X, years)$mean))
+  Mgs[[paste(g, s)]] <- Reduce("+", lapply(emulators,
+                                           function(emu) predict(emu, X, years)$mean))
 }
 
 records <- list()

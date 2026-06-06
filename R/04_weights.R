@@ -1,8 +1,8 @@
 # 04 - Weights: Don't calibrate by gcm, since 2007-2021 period is so dominated
-# interdecadal variability. Instead, calibrate each gcm one at a time and
+# by interdecadal variability. Instead, calibrate each gcm one at a time and
 # combine later using a uniform prior over gcm.
 
-if (!exists("predict_slc_mm")) source("R/03_emulate.R")
+if (!exists("emulators")) source("R/03_emulate.R")
 
 set.seed(cfg$weighting$seed)
 K        <- cfg$weighting$n_samples
@@ -40,11 +40,13 @@ sample_prior <- function(K) {
 # loglik_resid keeps the sigma-dependent normalisation (dropped in the spec's
 # softmax shorthand but it matters when sigma varies).
 basin_logL <- function(i, X) {
-  pr        <- predict_slc_mm_list[[i]](X, cfg$obs$target_year)
+  pr        <- predict(emulators[[i]], X, cfg$obs$target_year)
   sigma_mod <- cfg$weighting$sigma_mod_mult * sigma_obs_mm_list[[i]]
   sigma     <- sqrt(sigma_obs_mm_list[[i]]^2 + sigma_mod^2 + pr$sd^2)
-  logL      <- loglik_resid(Y_mm_list[[i]] - pr$mean, sigma,
-                            cfg$weighting$likelihood, cfg$weighting$student_t_df)
+  logL      <- loglik_resid(
+    Y_mm_list[[i]] - pr$mean, sigma,
+    cfg$weighting$likelihood, cfg$weighting$student_t_df
+  )
   list(pr = pr, logL = logL)
 }
 
