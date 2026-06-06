@@ -51,7 +51,7 @@ svd:
 weighting:
   obs_ref_scenario: "ssp126"   # forcing lookup for obs period (period is forcing-inert)
   n_samples: 10000             # K dense prior draws per GCM stratum
-  sigma_mod_mult: 1            # model discrepancy sigma_mod = sigma_mod_mult * sigma_obs
+  sigma_mod_mult: 2            # model discrepancy sigma_mod = sigma_mod_mult * sigma_obs
   likelihood: "gaussian"       # gaussian | student_t
   student_t_df: 4              # degrees of freedom if likelihood == student_t
   seed: 1
