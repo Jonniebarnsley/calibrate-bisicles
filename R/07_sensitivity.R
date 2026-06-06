@@ -16,23 +16,34 @@ probs  <- c(0.05, 0.17, 0.50, 0.83, 0.95)
 df_t   <- if (is.null(cfg$weighting$student_t_df)) 4 else cfg$weighting$student_t_df
 
 # --- Fixed per-GCM quantities (independent of the weighting setting) ---
-# obs-period M & sd per sample (from 04) + future M per (report-year, scenario).
+# Per-basin obs-period M & sd per sample (from 04, used to recompute the joint
+# logL under each setting) + future TOTAL SLC per (report-year, scenario).
 fixed <- setNames(lapply(gcms, function(g) {
   wg  <- weights[weights$gcm == g, ]
   fut <- list()
   for (s in scenarios) {
     X   <- build_norm_inputs(wg[, param_cols], g, s)
-    Msy <- predict_slc_mm(X, ryears)$mean              # K x length(ryears)
+    Msy <- Reduce("+", lapply(predict_slc_mm_list,
+                              function(pred) pred(X, ryears)$mean))   # K x length(ryears)
     for (j in seq_along(ryears)) fut[[paste(ryears[j], s)]] <- Msy[, j]
   }
-  list(M = wg$M_mm, sd = wg$emu_sd_mm, fut = fut)
+  per_basin <- lapply(basin_labels, function(bl) list(
+    M  = wg[[paste0("M_mm_",      bl)]],
+    sd = wg[[paste0("emu_sd_mm_", bl)]]
+  ))
+  list(per_basin = per_basin, fut = fut)
 }), gcms)
 
 # Recompute per-GCM weights for one (mult, likelihood) setting; sigma_obs is fixed.
+# Joint log-likelihood under independent basin errors: sum across basins.
 setting_weights <- function(g, mult, likelihood) {
-  f     <- fixed[[g]]
-  sigma <- sqrt(sigma_obs_mm^2 + (mult * sigma_obs_mm)^2 + f$sd^2)
-  logL  <- loglik_resid(Y_mm - f$M, sigma, likelihood, df_t)
+  f    <- fixed[[g]]
+  logL <- Reduce("+", lapply(seq_along(basin_labels), function(i) {
+    pb        <- f$per_basin[[i]]
+    sigma_obs <- sigma_obs_mm_list[[i]]
+    sigma     <- sqrt(sigma_obs^2 + (mult * sigma_obs)^2 + pb$sd^2)
+    loglik_resid(Y_mm_list[[i]] - pb$M, sigma, likelihood, df_t)
+  }))
   w <- exp(logL - max(logL)); w / sum(w)
 }
 

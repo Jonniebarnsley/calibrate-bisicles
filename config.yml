@@ -2,8 +2,14 @@
 # Runs should change ONLY this file, never code.
 
 paths:
-  ensemble: "ANT_2007-2300_sle.csv"
-  imbie: "imbie_antarctica_2021_mm.csv"
+  ensemble:
+    - "WAIS_2007-2300_sle.csv"
+    - "EAIS_2007-2300_sle.csv"
+    - "APIS_2007-2300_sle.csv"
+  imbie:
+    - "imbie_west_antarctica_2021_mm.csv"
+    - "imbie_east_antarctica_2021_mm.csv"
+    - "imbie_antarctic_peninsula_2021_mm.csv"
   outputs: "outputs"
 
 data:
@@ -25,7 +31,6 @@ priors:
 obs:
   baseline_year: 2007        # ensemble slc baseline (slc == 0 here)
   target_year: 2021          # cumulative-window end; IMBIE record actually ends 2020.92
-  # sigma_obs_cum_mm is derived in 02 as sqrt(sigma_t1^2 - sigma_t0^2) from IMBIE.
 
 emulator:
   kernel_type: "matern_5_2"
@@ -33,26 +38,26 @@ emulator:
   nugget_est: true
   leave_one_out: true                # write LOO scatter PDFs to outputs/diagnostics/
   main_effects: true                 # write main-effects sweep PDFs to outputs/diagnostics/
-  diagnostic_years: [2021, 2300]
+  diagnostic_years: [2021, 2300]     # years at which to produce LOO or main-effects plots
 
 # Emulator mode: per-year GPs (default) vs SVD basis-function emulator (Higdon 2008).
 svd:
-  enabled: false            # false = one GP per year; true = SVD coefficient emulators
+  enabled: true             # false = one GP per year; true = SVD coefficient emulators
   n_components: 5           # number of SVD components to emulate when enabled
   run_diagnostic: false     # write outputs/svd_diagnostic.csv (r=1..9 reconstruction metrics)
 
 weighting:
   obs_ref_scenario: "ssp126"   # forcing lookup for obs period (period is forcing-inert)
   n_samples: 10000             # K dense prior draws per GCM stratum
-  sigma_mod_mult: 2            # model discrepancy sigma_mod = sigma_mod_mult * sigma_obs
+  sigma_mod_mult: 1            # model discrepancy sigma_mod = sigma_mod_mult * sigma_obs
   likelihood: "gaussian"       # gaussian | student_t
   student_t_df: 4              # degrees of freedom if likelihood == student_t
   seed: 1
 
 projection:
-  year_from: 2010
+  year_from: 2007
   year_to: 2300
-  year_by: 10
+  year_by: 1
   gcm_marginal: true           # also report a uniform-GCM-prior marginal
   cache_emulators: true        # cache per-year GPs in outputs/emulators/
 
@@ -67,11 +72,10 @@ sensitivity:
 # the 6 continuous params + a forcing-severity axis via the emulator. Independent of
 # the calibration weighting.
 variance:
-  year_from: 2020
+  year_from: 2010
   year_to: 2300
-  year_by: 5                 # timestep stride for the decomposition
-  sobol_n: 4000              # Saltelli base sample N; total emulator evals = N*(k+2)
+  year_by: 1                   # timestep stride for the decomposition
+  sobol_n: 4000                # Saltelli base sample N; total emulator evals = N*(k+2)
   sobol_convergence: [1000, 2000, 4000, 8000]  # N values for a one-off convergence check
-  forcing_severity: "warming"  # severity coordinate; thermal_forcing mapped from it per GCM
+  forcing_severity: "GMSTa"    # severity coordinate spanning GCMs within each scenario
   sobol_smooth_window: 5       # smoothing window for the Sobol' plots; set to 1 to disable
-  

@@ -4,6 +4,6 @@
 
 config_path <- "config.yml"
 source("R/00_setup.R")
-source("R/03_emulator.R")
+source("R/03_emulate.R")
 source("R/08_variance_decomposition.R")
 message("Variance decomposition complete. Outputs in ", out_dir)

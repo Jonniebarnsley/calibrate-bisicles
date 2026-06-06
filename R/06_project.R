@@ -23,13 +23,14 @@ row_qs <- function(gcm, scenario, year, dist, M, w) {
              mean = weighted.mean(M, w))
 }
 
-# Predict each (GCM, scenario) once over ALL years -> K x n_years matrix (in SVD mode
-# this reuses one coefficient prediction across years; in per-year mode it loops the
-# cached annual GPs). Summaries then index the right column per year.
+# Predict each (GCM, scenario) once over ALL years -> K x n_years TOTAL SLC matrix.
+# Total SLC = sum of per-basin emulator means (linearity of expectation). For
+# single-basin this reduces to the primary basin's predictions.
 Mgs <- list()
 for (g in gcms) for (s in scenarios) {
   X <- build_norm_inputs(post_by_gcm[[g]][, param_cols], g, s)
-  Mgs[[paste(g, s)]] <- predict_slc_mm(X, years)$mean
+  Mgs[[paste(g, s)]] <- Reduce("+", lapply(predict_slc_mm_list,
+                                           function(pred) pred(X, years)$mean))
 }
 
 records <- list()
@@ -66,14 +67,17 @@ write.csv(projection, file.path(out_dir, "projection.csv"), row.names = FALSE)
 # ---------------------------------------------------------------------------
 i2300 <- match(2300L, years)
 if (!is.na(i2300)) {
+  K_res <- 10000L                                 # resample count per GCM / panel
+  set.seed(cfg$weighting$seed)
+
+  # SIR resample per GCM; pivot scenarios to columns so each row is one
+  # posterior draw evaluated under all forcings (no weight column needed).
   sle_2300 <- do.call(rbind, lapply(gcms, function(g) {
-    pg <- post_by_gcm[[g]]
-    do.call(rbind, lapply(scenarios, function(s) {
-      data.frame(model    = g,
-                 scenario = s,
-                 weight   = pg$weight,
-                 slc_mm   = Mgs[[paste(g, s)]][, i2300])
-    }))
+    pg  <- post_by_gcm[[g]]
+    idx <- sample.int(nrow(pg), K_res, replace = TRUE, prob = pg$weight)
+    df  <- data.frame(model = rep(g, K_res))
+    for (s in scenarios) df[[paste0(s, "_sle")]] <- Mgs[[paste(g, s)]][idx, i2300]
+    df
   }))
   write.csv(sle_2300, file.path(out_dir, "sle_2300.csv"), row.names = FALSE)
 
@@ -91,8 +95,6 @@ if (!is.na(i2300)) {
                         function(p) p$w / length(gcms)), use.names = FALSE))
 
     lim <- range(unlist(lapply(panels, function(p) c(p$x, p$y))))
-    set.seed(cfg$weighting$seed)
-    K_res <- 10000L                                 # resample count per panel
 
     pdf(file.path(out_dir, "sle_2300_ssp126_vs_ssp534over.pdf"),
         width = 11, height = 7.5)

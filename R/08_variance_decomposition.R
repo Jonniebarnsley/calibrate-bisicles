@@ -6,12 +6,21 @@
 #       spans the GCMs' forcing values; the GCM dummy tracks the nearest GCM).
 # Run via run_variance.R. Follows Seroussi et al. (2023) / Coulon et al. (2025).
 
-if (!exists("predict_slc_mm")) source("R/03_emulator.R")
+if (!exists("predict_slc_mm")) source("R/03_emulate.R")
 
 suppressPackageStartupMessages({ library(car); library(sensitivity); library(randtoolbox) })
 
 vcfg   <- cfg$variance
 vyears <- seq(vcfg$year_from, vcfg$year_to, by = vcfg$year_by)
+
+# Total SLC at year yr = sum of per-basin year columns across all ensembles
+# (the ensembles are row-aligned by construction in 01).
+total_slr_year <- function(yr)
+  Reduce("+", lapply(ensembles, function(e) e[[ycol(yr)]]))
+
+# Emulated TOTAL SLC mean = sum of per-basin emulator means.
+predict_total_mm <- function(X, year)
+  Reduce("+", lapply(predict_slc_mm_list, function(pred) pred(X, year)$mean))
 
 # ---------------------------------------------------------------------------
 # (A) ANOVA — Type III SS fractions on the raw ensemble, per year.
@@ -30,7 +39,7 @@ anova_fractions <- function(formula, df, factors) {
 }
 
 anova_combined <- do.call(rbind, lapply(vyears, function(yr) {
-  d <- data.frame(slr = ensemble[[ycol(yr)]],
+  d <- data.frame(slr = total_slr_year(yr),
                   gcm = factor(ensemble[[gcm_col]]),
                   scenario = factor(ensemble[[scen_col]]))
   d <- d[is.finite(d$slr), ]
@@ -41,7 +50,7 @@ anova_combined <- do.call(rbind, lapply(vyears, function(yr) {
 anova_per_scenario <- do.call(rbind, lapply(scenarios, function(s) {
   do.call(rbind, lapply(vyears, function(yr) {
     sel <- ensemble[[scen_col]] == s
-    d <- data.frame(slr = ensemble[[ycol(yr)]][sel],
+    d <- data.frame(slr = total_slr_year(yr)[sel],
                     gcm = factor(ensemble[[gcm_col]][sel]))
     d <- d[is.finite(d$slr), ]
     fr <- anova_fractions(slr ~ gcm, d, "gcm")
@@ -61,16 +70,18 @@ message("08A: ANOVA done.")
 # (by warming) so each GCM's real behaviour is recovered at its forcing point — i.e.
 # GCM is "represented through forcing intensity".
 # ---------------------------------------------------------------------------
-sev_col   <- vcfg$forcing_severity              # "warming"
-other_col <- setdiff(forcing_cols, sev_col)     # "thermal_forcing"
-sobol_inputs <- c(param_cols, "forcing")
+sev_col      <- vcfg$forcing_severity
+sobol_inputs <- c(param_cols, "GMSTa")
 k <- length(sobol_inputs)                       # 7
 
+# GMSTa sampled uniformly across the GCM range within each scenario; the GCM
+# dummy tracks the nearest GCM by GMSTa so each GCM's emulator behaviour is
+# recovered at its own forcing point.
 forcing_map <- setNames(lapply(scenarios, function(s) {
   fl  <- forcing_lookup[forcing_lookup[[scen_col]] == s, ]
-  fl  <- fl[order(fl[[sev_col]]), ]             # GCMs ordered by warming
-  w   <- fl[[sev_col]]; fit <- lm(fl[[other_col]] ~ w)
-  list(smin = min(w), smax = max(w), a = unname(coef(fit)[1]), b = unname(coef(fit)[2]),
+  fl  <- fl[order(fl[[sev_col]]), ]
+  w   <- fl[[sev_col]]
+  list(smin = min(w), smax = max(w),
        gcm_sorted = as.character(fl[[gcm_col]]), mids = (head(w, -1) + tail(w, -1)) / 2)
 }), scenarios)
 
@@ -86,9 +97,8 @@ design_to_inputs <- function(D, s) {
   }
   fm  <- forcing_map[[s]]
   sev <- fm$smin + D[, k] * (fm$smax - fm$smin)
-  X[, sev_col]   <- norm_apply(sev, norm_specs[[sev_col]])
-  X[, other_col] <- norm_apply(fm$a + fm$b * sev, norm_specs[[other_col]])
-  nearest <- fm$gcm_sorted[findInterval(sev, fm$mids) + 1L]   # GCM dummy tracks forcing
+  X[, sev_col] <- norm_apply(sev, norm_specs[[sev_col]])
+  nearest <- fm$gcm_sorted[findInterval(sev, fm$mids) + 1L]
   if (length(gcm_input_cols))
     X[, gcm_input_cols] <- outer(nearest, gcm_input_cols, `==`) * 1
   X
@@ -105,7 +115,7 @@ sobol_design <- function(N) {
 # Single (scenario, year) cell — used only by the convergence check.
 sobol_one <- function(s, yr, N) {
   so <- sobol_design(N)
-  so <- sensitivity::tell(so, predict_slc_mm(design_to_inputs(as.matrix(so$X), s), yr)$mean / 1000)
+  so <- sensitivity::tell(so, predict_total_mm(design_to_inputs(as.matrix(so$X), s), yr) / 1000)
   data.frame(input = sobol_inputs, S = so$S$original, T = so$T$original)
 }
 
@@ -115,7 +125,7 @@ sobol_one <- function(s, yr, N) {
 Nsob <- vcfg$sobol_n
 so0  <- sobol_design(Nsob)
 sobol_by_scenario <- do.call(rbind, lapply(scenarios, function(s) {
-  Yall <- predict_slc_mm(design_to_inputs(as.matrix(so0$X), s), vyears)$mean / 1000
+  Yall <- predict_total_mm(design_to_inputs(as.matrix(so0$X), s), vyears) / 1000
   do.call(rbind, lapply(seq_along(vyears), function(yi) {
     so <- sensitivity::tell(so0, Yall[, yi])
     data.frame(scenario = s, year = vyears[yi], input = sobol_inputs,
@@ -162,7 +172,7 @@ smooth_ma <- function(x, k) {
 }
 sobol_wide <- function(s) {
   M <- to_wide(sobol_by_scenario[sobol_by_scenario$scenario == s, ], "S", "input")
-  M[M < 0] <- 0; M <- M[, c(param_cols, "forcing")]
+  M[M < 0] <- 0; M <- M[, c(param_cols, "GMSTa")]
   kw <- vcfg$sobol_smooth_window           # smooth each input's S(t) before stacking
   for (j in seq_len(ncol(M))) M[, j] <- smooth_ma(M[, j], kw)
   M <- cbind(M, interactions = pmax(0, 1 - rowSums(M)))

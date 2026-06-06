@@ -4,28 +4,40 @@
 
 if (!exists("weights", inherits = FALSE)) source("R/04_weights.R")
 
-summ <- weights |>
-  dplyr::group_by(gcm) |>
-  dplyr::summarise(
-    K        = dplyr::n(),
-    ESS      = 1 / sum(weight^2),
-    ESS_frac = (1 / sum(weight^2)) / dplyr::n(),
-    M_min    = min(M_mm),
-    M_med    = median(M_mm),
-    M_max    = max(M_mm),
-    Y_inside = (Y_mm >= min(M_mm) & Y_mm <= max(M_mm)),
-    Y_pctile = mean(M_mm < Y_mm) * 100,
-    .groups  = "drop"
-  )
+# Per-basin coverage + (joint) ESS summary. ESS depends on the joint weight
+# only, so it's reported once per GCM (under the "ALL" basin row); per-basin
+# rows carry NA for ESS and just report whether each basin's observation falls
+# inside that basin's sampled prediction range.
+summ_rows <- list()
+for (g in gcms) {
+  wg     <- weights[weights$gcm == g, ]
+  ess    <- 1 / sum(wg$weight^2)
+  K_g    <- nrow(wg)
+  for (b in seq_along(basin_labels)) {
+    bl  <- basin_labels[b]
+    M   <- wg[[paste0("M_mm_", bl)]]
+    Yb  <- Y_mm_list[[b]]
+    summ_rows[[length(summ_rows) + 1L]] <- data.frame(
+      gcm      = g, basin = bl, K = K_g,
+      ESS      = if (b == 1L) ess else NA_real_,
+      ESS_frac = if (b == 1L) ess / K_g else NA_real_,
+      M_min    = min(M), M_med = median(M), M_max = max(M),
+      Y_obs    = Yb,
+      Y_inside = (Yb >= min(M) & Yb <= max(M)),
+      Y_pctile = mean(M < Yb) * 100
+    )
+  }
+}
+summ <- do.call(rbind, summ_rows)
 print(summ)
 write.csv(summ, file.path(out_dir, "diagnostics_summary.csv"), row.names = FALSE)
 
 for (i in seq_len(nrow(summ))) {
   s <- summ[i, ]
   if (!s$Y_inside)
-    warning(sprintf("[COVERAGE] %s: Y=%.2f mm outside sampled M [%.2f, %.2f] -> extrapolation.",
-                    s$gcm, Y_mm, s$M_min, s$M_max))
-  if (s$ESS_frac < 0.02)
+    warning(sprintf("[COVERAGE] %s/%s: Y=%.2f mm outside sampled M [%.2f, %.2f] -> extrapolation.",
+                    s$gcm, s$basin, s$Y_obs, s$M_min, s$M_max))
+  if (!is.na(s$ESS_frac) && s$ESS_frac < 0.02)
     warning(sprintf("[COLLAPSE] %s: ESS=%.0f (%.1f%% of K) -> raise sigma_mod_mult.",
                     s$gcm, s$ESS, 100 * s$ESS_frac))
 }

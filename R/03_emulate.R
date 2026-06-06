@@ -1,6 +1,11 @@
-# 03 — emulator trunk: shared infrastructure + mode dispatch.
+# 03 — emulator trunk: shared infrastructure + basin dispatch.
+# For a single basin (cfg$paths$ensemble is a scalar string) this is identical
+# to the previous single-basin behaviour. For multiple basins it calls
+# build_emulator() once per basin and exposes predict_slc_mm_list.
+# predict_slc_mm always points to the first (primary) basin's predict function
+# so downstream stages that only need one emulator are unaffected.
 
-if (!exists("Y_mm")) source("R/02_load_obs.R")
+if (!exists("Y_mm"))    source("R/02_load_obs.R")
 if (!exists("ensemble")) source("R/01_load_ensemble.R")
 
 emu_cols <- c(param_cols, gcm_input_cols, forcing_cols)
@@ -43,7 +48,7 @@ if (!dir.exists(diag_dir)) dir.create(diag_dir, recursive = TRUE)
 
 # LOO scatter PDF: actual vs predicted, with +/-2sd error bars and headline
 # metrics (RMSE, pass-rate, normalised error distance).
-write_loo_pdf <- function(df, year) {
+write_loo_pdf <- function(df, year, label) {
   df$UB <- df$mean + 2 * df$sd
   df$LB <- df$mean - 2 * df$sd
   df$ok <- df$actual > df$LB & df$actual < df$UB
@@ -59,7 +64,7 @@ write_loo_pdf <- function(df, year) {
   lim   <- range(df$LB, df$UB)
 
   # Make and save plot
-  pdf(file.path(diag_dir, sprintf("loo_%d.pdf", year)),
+  pdf(file.path(diag_dir, sprintf("loo_%d_%s.pdf", year, label)),
       width = 4.6, height = 4.6)
   par(mar = c(4, 4, 2.5, 1))
   plot(good$actual, good$mean,
@@ -81,13 +86,12 @@ write_loo_pdf <- function(df, year) {
 }
 
 # Main-effects PDF: each non-dummy input is swept on [0,1] with all others
-# (including GCM dummies) fixed at 0.5. predict_slc_mm is referenced lazily —
-# it's resolved when the function is *called*, so this definition can come
-# before the mode dispatch that sets predict_slc_mm.
+# (including GCM dummies) fixed at 0.5. predict_fn is passed explicitly so
+# the correct basin's emulator is used.
 diag_colors <- c("orangered", "seagreen3", "royalblue1", "plum2",
                  "slateblue1", "sienna1", "goldenrod1", "darkseagreen")
 
-write_main_effects_pdf <- function(year) {
+write_main_effects_pdf <- function(year, label, predict_fn) {
   sweep_cols <- setdiff(emu_cols, gcm_input_cols)
   ntest      <- 100
   grid       <- seq(0, 1, length.out = ntest)
@@ -98,7 +102,7 @@ write_main_effects_pdf <- function(year) {
     X <- matrix(0.5, nrow = ntest, ncol = length(emu_cols),
                 dimnames = list(NULL, emu_cols))
     X[, col] <- grid
-    pr <- predict_slc_mm(X, year) # predict function depends on svd.enabled
+    pr <- predict_fn(X, year) # predict function depends on svd.enabled
     me[[col]] <- data.frame(x = grid, mean = pr$mean,
                             LB = pr$mean - 2 * pr$sd,
                             UB = pr$mean + 2 * pr$sd)
@@ -111,7 +115,7 @@ write_main_effects_pdf <- function(year) {
   ymin <- min(vapply(me, function(d) min(d$LB), numeric(1)))
 
   # Make and save plot
-  pdf(file.path(diag_dir, sprintf("main_effects_%d.pdf", year)),
+  pdf(file.path(diag_dir, sprintf("main_effects_%d_%s.pdf", year, label)),
       width = 3.2 * b, height = 2.8 * a)
   par(mfrow = c(a, b), mar = c(4, 4, 2, 1), oma = c(0, 0, 2.5, 0))
   for (i in seq_along(me)) {
@@ -127,24 +131,31 @@ write_main_effects_pdf <- function(year) {
   mtext(sprintf("Main effects at %d (all other inputs fixed at 0.5)", year),
         outer = TRUE, line = 0.7, cex = 1.0, font = 2)
   dev.off()
-  message(sprintf("03: wrote main_effects_%d.pdf", year))
+  message(sprintf("03: wrote main_effects_%d_%s.pdf", year, label))
 }
 
-# Predict function depends on svd.enabled in config:
-#  - if false, emulate each year separately.
-#  - if true, emulate svd coeffs and predict slc through linear combination.
-# SVD approach is much faster when requesting many years, as can be done by
-# training only ~5 emulators. Both return slc mean & sd (mm) for a given input,
-# at one year (returns vectors) or several (returns K x length(year) matrices).
-# 03a/03b call write_loo_pdf at source time, so they're sourced after both
-# helpers above are defined.
+# Source the mode-specific builder and the basin dispatcher.
+# emulate_by_svd/year expose build_svd_state / build_peryear_emulators.
+# emulate_basin exposes build_emulator().
 if (isFALSE(cfg$svd$enabled)) {
-  source("R/03a_emulate_by_year.R")
-  predict_slc_mm <- peryear_predict_mm
+  source("R/emulator/emulate_by_year.R")
 } else {
-  source("R/03b_emulate_by_svd.R")
-  predict_slc_mm <- svd_predict_mm
+  source("R/emulator/emulate_by_svd.R")
 }
+source("R/emulator/emulate_basin.R")
+
+# Build one emulator per basin. predict_slc_mm always points to the first
+# (primary) basin for stages that only need one emulator (projection, variance
+# decomposition); predict_slc_mm_list holds all basins for stages that need
+# the joint likelihood (weighting).
+predict_slc_mm_list <- setNames(
+  lapply(seq_along(basin_labels),
+         function(i) build_emulator(ensembles[[i]], basin_labels[i])),
+  basin_labels
+)
+predict_slc_mm <- predict_slc_mm_list[[1]]
 
 if (isTRUE(cfg$emulator$main_effects))
-  for (year in cfg$emulator$diagnostic_years) write_main_effects_pdf(year)
+  for (year in cfg$emulator$diagnostic_years)
+    for (i in seq_along(predict_slc_mm_list))
+      write_main_effects_pdf(year, basin_labels[i], predict_slc_mm_list[[i]])
