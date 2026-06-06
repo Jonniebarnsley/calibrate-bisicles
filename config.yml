@@ -79,5 +79,4 @@ variance:
   year_by: 1                   # timestep stride for the decomposition
   sobol_n: 4000                # Saltelli base sample N; total emulator evals = N*(k+2)
   sobol_convergence: [1000, 2000, 4000, 8000]  # N values for a one-off convergence check
-  forcing_severity: "GMSTa"    # severity coordinate spanning GCMs within each scenario
   sobol_smooth_window: 5       # smoothing window for the Sobol' plots; set to 1 to disable

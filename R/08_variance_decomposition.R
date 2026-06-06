@@ -64,18 +64,17 @@ message("08A: ANOVA done.")
 
 # ---------------------------------------------------------------------------
 # (B) Sobol' — 6 params + 1 forcing-severity axis, PER SCENARIO, via the emulator.
-# Within a scenario the forcing axis spans the GCMs' warming values: as severity
-# rises we move from the low- to the high-forcing GCM. thermal_forcing is mapped from
-# warming by a within-scenario linear fit, and the GCM dummy tracks the nearest GCM
-# (by warming) so each GCM's real behaviour is recovered at its forcing point — i.e.
-# GCM is "represented through forcing intensity".
+# Within a scenario the forcing axis spans the GCMs' forcing values: as severity
+# rises we move from the low- to the high-forcing GCM, and the GCM dummy tracks
+# the nearest GCM (by forcing) so each GCM's real behaviour is recovered at its
+# forcing point — i.e. GCM is "represented through forcing intensity".
 # ---------------------------------------------------------------------------
-sev_col      <- vcfg$forcing_severity
-sobol_inputs <- c(param_cols, "GMSTa")
+sev_col      <- cfg$data$forcing_cols[1]
+sobol_inputs <- c(param_cols, sev_col)
 k <- length(sobol_inputs)                       # 7
 
-# GMSTa sampled uniformly across the GCM range within each scenario; the GCM
-# dummy tracks the nearest GCM by GMSTa so each GCM's emulator behaviour is
+# Forcing sampled uniformly across the GCM range within each scenario; the GCM
+# dummy tracks the nearest GCM by forcing so each GCM's emulator behaviour is
 # recovered at its own forcing point.
 forcing_map <- setNames(lapply(scenarios, function(s) {
   fl  <- forcing_lookup[forcing_lookup[[scen_col]] == s, ]
@@ -172,7 +171,7 @@ smooth_ma <- function(x, k) {
 }
 sobol_wide <- function(s) {
   M <- to_wide(sobol_by_scenario[sobol_by_scenario$scenario == s, ], "S", "input")
-  M[M < 0] <- 0; M <- M[, c(param_cols, "GMSTa")]
+  M[M < 0] <- 0; M <- M[, c(param_cols, sev_col)]
   kw <- vcfg$sobol_smooth_window           # smooth each input's S(t) before stacking
   for (j in seq_len(ncol(M))) M[, j] <- smooth_ma(M[, j], kw)
   M <- cbind(M, interactions = pmax(0, 1 - rowSums(M)))
